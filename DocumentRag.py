@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 import os
 from langgraph.graph import StateGraph, END
 from typing import TypedDict, Annotated, Sequence
-from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, ToolMessage
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, ToolMessage, AIMessage
 from operator import add as add_messages
 from langchain_groq import ChatGroq
 from langchain_openai import OpenAIEmbeddings
@@ -11,6 +11,8 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_chroma import Chroma
 from langchain_core.tools import tool
+import chainlit as cl
+import asyncio
 
 load_dotenv()
 
@@ -189,20 +191,64 @@ graph.set_entry_point("agent_node")
 app = graph.compile()
 
 
-def running_agent():
-    print("\n=== RAG AGENT===")
+@cl.on_chat_start
+async def start():
+    cl.user_session.set("graph", app)
 
-    while True:
-        user_input = input("\nWhat is your question: ")
-        if user_input.lower() in ['exit', 'quit']:
-            break
+    await cl.Message(content="Ask anything about the Stock Market 2024...").send()
 
-        messages = [HumanMessage(content=user_input)]  # converts back to a HumanMessage type
+@cl.on_message
+async def main(message: cl.Message):
+    graph = cl.user_session.get("graph")
+    msg = cl.Message(content = "")
 
-        result = app.invoke({"messages": messages})
+    await msg.send()
 
-        print("\n=== ANSWER ===")
-        print(result['messages'][-1].content)
+    full_response = ""
+
+    async for event in graph.astream(
+            {"messages": [HumanMessage(content = message.content)]},
+            config={"configurable": {"thread_id": "default"}},
+            version="v2"
+    ):
+
+        print("Event received: ", event)
+
+        if "agent_node" in event:
+            messages = event["agent_node"].get("messages", [])
+            for m in messages:
+                if isinstance(m, AIMessage):
+                    full_response += m.content
+
+                    for char in m.content:
+                        await msg.stream_token(char)
+                        await asyncio.sleep(0.01)
+
+            kind = getattr(event, "event", None)
+            if kind == "on_tool_start":
+                await msg.stream_token(f"\n\n🛠️ Using tool: {getattr(event, 'name', '')}...")
+            elif kind == "on_tool_end":
+                await msg.stream_token(f"\n✅ Tool finished: {event.data['output'][:200]}...")
+
+            await msg.update()
 
 
-running_agent()
+
+
+# def running_agent():
+#     print("\n=== RAG AGENT===")
+#
+#     while True:
+#         user_input = input("\nWhat is your question: ")
+#         if user_input.lower() in ['exit', 'quit']:
+#             break
+#
+#         messages = [HumanMessage(content=user_input)]  # converts back to a HumanMessage type
+#
+#         result = app.invoke({"messages": messages})
+#
+#         print("\n=== ANSWER ===")
+#         print(result['messages'][-1].content)
+#
+#
+# running_agent()
